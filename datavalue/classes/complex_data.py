@@ -1,387 +1,721 @@
-# Library import
-from typing import Type, Optional, Any, Iterable, Dict, Union
-from .. import exceptions
-from .primitive_data import PrimitiveData
+"""ComplexData with optional positional collection validation."""
+
+from __future__ import annotations
+
 import json
 
-# Classes definition
+from enum import Enum
+from typing import Any, Dict, Iterable, Optional, Type, Union
+
+from .. import exceptions
+from .primitive_data import PrimitiveData
+
+
+class ValidationMode(str, Enum):
+    """How collection elements are matched against ``possible_values``."""
+
+    ANY = "any"
+    POSITIONAL = "positional"
+
+
 class ComplexData:
-    def __init__(self,
-        data_type: Type[list] | Type[tuple] | Type[set] | Type[frozenset] | Type[dict],
+    """Description and strict validation of compound Python values.
+
+    ``validation_mode='any'`` preserves the historical behavior: every
+    collection element may match any validator from ``possible_values``.
+
+    ``validation_mode='positional'`` is available for ``list`` and ``tuple``:
+    every value must match the validator located at the same index and the
+    collection length must exactly match the schema length.
+    """
+
+    def __init__(
+        self,
+        data_type: (
+            Type[list]
+            | Type[tuple]
+            | Type[set]
+            | Type[frozenset]
+            | Type[dict]
+        ),
         value: Any,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        maximum_length: Optional[int] = None, minimum_length: Optional[int] = None,
-        possible_values: Optional[Union[Iterable, Dict[Any, Any]]] = None,
-        
-        data_class: Optional[bool] = False
+        maximum_length: Optional[int] = None,
+        minimum_length: Optional[int] = None,
+        possible_values: Optional[
+            Union[Iterable, Dict[Any, Any]]
+        ] = None,
+        data_class: Optional[bool] = False,
+        validation_mode: ValidationMode | str = ValidationMode.ANY,
     ) -> None:
-        # Instance properties assignment
+        # Keep every historical constructor argument in its original position.
+        # validation_mode is appended so positional callers remain compatible.
         self.data_type = data_type
         self.value = value
         self.name = name
         self.description = description
-        self.maximum_length = maximum_length; self.minimum_length = minimum_length
+        self.maximum_length = maximum_length
+        self.minimum_length = minimum_length
         self.possible_values = possible_values
         self.data_class = data_class
 
-        # Validate constructor parameters
-        if self.possible_values:
-            # 1. Caso Diccionario (Mapping Schema)
-            if self.data_type is dict and isinstance(self.possible_values, dict):
-                pass # Es un esquema de mapeo válido
+        try:
+            self.validation_mode = ValidationMode(validation_mode)
+        except ValueError as error:
+            allowed = ", ".join(mode.value for mode in ValidationMode)
+            raise exceptions.ValidationModeException(
+                f"Unknown validation mode: {validation_mode!r}. "
+                f"Allowed modes: {allowed}."
+            ) from error
 
-            # 2. Caso Colecciones (list/tuple)
-            elif isinstance(self.possible_values, (list, tuple)):
-                if self.data_type is dict:
-                    if len(self.possible_values) not in (1, 2):
-                        raise ValueError("Possible values for dict must be 1 (keys) or 2 (keys, values) list/tuples.")
-                    if not isinstance(self.possible_values[0], (list, tuple)):
-                        raise ValueError("The first element of possible_values for dict must be a list/tuple of keys.")
-            else:
-                raise ValueError(f"Possible values must be list/tuple or dict. Received: {type(self.possible_values).__name__}")
-        
+        self._validate_constructor()
 
-        # Execute instance data validation
         if not self.data_class:
             self.validate()
-    
-    # Private methods
+
+    # =========================================================
+    # CONSTRUCTOR VALIDATION
+    # =========================================================
+
+    def _validate_constructor(self) -> None:
+        supported_types = (list, tuple, set, frozenset, dict)
+
+        if self.data_type not in supported_types:
+            raise TypeError(
+                "ComplexData data_type must be list, tuple, set, "
+                f"frozenset or dict. Received: {self.data_type!r}."
+            )
+
+        if (
+            self.validation_mode is ValidationMode.POSITIONAL
+            and self.data_type not in (list, tuple)
+        ):
+            raise exceptions.ValidationModeException(
+                "Positional validation is only supported for list and tuple."
+            )
+
+        if self.validation_mode is ValidationMode.POSITIONAL:
+            if self.possible_values is None:
+                raise ValueError(
+                    "Positional validation requires possible_values. "
+                    "Use an empty tuple for a zero-length contract."
+                )
+
+            if not isinstance(self.possible_values, (list, tuple)):
+                raise ValueError(
+                    "Positional possible_values must be list or tuple. "
+                    f"Received: {type(self.possible_values).__name__}."
+                )
+
+            return
+
+        # Historical constructor validation for mode="any".
+        if self.possible_values:
+            if self.data_type is dict and isinstance(
+                self.possible_values,
+                dict,
+            ):
+                return
+
+            if isinstance(self.possible_values, (list, tuple)):
+                if self.data_type is dict:
+                    if len(self.possible_values) not in (1, 2):
+                        raise ValueError(
+                            "Possible values for dict must be 1 (keys) "
+                            "or 2 (keys, values) list/tuples."
+                        )
+
+                    if not isinstance(
+                        self.possible_values[0],
+                        (list, tuple),
+                    ):
+                        raise ValueError(
+                            "The first element of possible_values for dict "
+                            "must be a list/tuple of keys."
+                        )
+
+                return
+
+            raise ValueError(
+                "Possible values must be list/tuple or dict. "
+                f"Received: {type(self.possible_values).__name__}."
+            )
+
+    # =========================================================
+    # MATCHING
+    # =========================================================
+
     def _is_match(self, element: Any, schema: Any) -> bool:
-        # Validate data types
         if isinstance(schema, (PrimitiveData, ComplexData)):
             try:
                 return schema.validate(element)
-            except:
+            except (
+                exceptions.DataValueException,
+                ValueError,
+                TypeError,
+            ):
                 return False
-        
-        # Validate class data types
+
         if isinstance(schema, type):
             return isinstance(element, schema)
-    
-        # Validate literal values
+
         return element == schema
-            
+
     def _validate_collection(self, data: Any) -> bool:
-        element_index: int = 0
-        for element in data:
-            if not any(self._is_match(element, validator) for validator in self.possible_values):
-                raise ValueError(f"[ComplexData] Element: {element}, on index: {element_index} is not allowed.")
-            element_index += 1
-        
-        # Return results
+        """Historical unordered/alternative matching behavior."""
+
+        for index, element in enumerate(data):
+            if not any(
+                self._is_match(element, validator)
+                for validator in self.possible_values
+            ):
+                raise ValueError(
+                    f"[ComplexData] Element: {element}, on index: "
+                    f"{index} is not allowed."
+                )
+
+        return True
+
+    def _validate_positional_collection(self, data: Any) -> bool:
+        schemas = self.possible_values
+
+        if len(data) != len(schemas):
+            raise exceptions.PositionalLengthException(
+                expected=len(schemas),
+                received=len(data),
+            )
+
+        for index, (element, schema) in enumerate(zip(data, schemas)):
+            if not self._is_match(element, schema):
+                raise exceptions.PositionalValueException(
+                    index=index,
+                    value=element,
+                    schema=schema,
+                )
+
         return True
 
     def _validate_dictionary(self, data: Any) -> bool:
-        # ESCENARIO A: Schema Mapping (possible_values es un dict)
+        # Scenario A: mapping schema.
         if isinstance(self.possible_values, dict):
             for input_key, input_value in data.items():
                 matched_rule = False
-                for schema_key, value_validators in self.possible_values.items():
-                    # Validamos si la clave de entrada coincide con la regla (soporta Regex o Tipos)
+
+                for schema_key, value_validators in (
+                    self.possible_values.items()
+                ):
                     if self._is_match(input_key, schema_key):
                         matched_rule = True
-                        
-                        # Normalizamos validadores a lista para permitir múltiples opciones por clave
-                        if not isinstance(value_validators, (list, tuple, set, frozenset)):
+
+                        if not isinstance(
+                            value_validators,
+                            (list, tuple, set, frozenset),
+                        ):
                             validators = [value_validators]
                         else:
                             validators = value_validators
-                        
-                        if not any(self._is_match(input_value, v) for v in validators):
-                            raise ValueError(f"[ComplexData] Invalid value '{input_value}' for key '{input_key}'")
-                        break # Match encontrado para esta clave, pasar a la siguiente
-                
+
+                        if not any(
+                            self._is_match(input_value, validator)
+                            for validator in validators
+                        ):
+                            raise ValueError(
+                                "[ComplexData] Invalid value "
+                                f"'{input_value}' for key '{input_key}'"
+                            )
+
+                        break
+
                 if not matched_rule:
-                    raise ValueError(f"[ComplexData] Key '{input_key}' is not allowed by schema mapping.")
+                    raise ValueError(
+                        f"[ComplexData] Key '{input_key}' is not allowed "
+                        "by schema mapping."
+                    )
+
             return True
 
-        # ESCENARIO B: Validación Posicional/Tradicional
-        if not isinstance(self.possible_values, (list, tuple)) or len(self.possible_values) != 2:
+        # Scenario B: historical key/value schema.
+        if (
+            not isinstance(self.possible_values, (list, tuple))
+            or len(self.possible_values) != 2
+        ):
             keys_schema = self.possible_values
             values_schema = None
         else:
             keys_schema, values_schema = self.possible_values
-        
+
         for key, value in data.items():
             if keys_schema:
-                if not any(self._is_match(key, validator) for validator in keys_schema):
+                if not any(
+                    self._is_match(key, validator)
+                    for validator in keys_schema
+                ):
                     raise ValueError(f"[ComplexData] Invalid key: {key}")
-            
+
             if values_schema:
-                if not any(self._is_match(value, validator) for validator in values_schema):
-                    raise ValueError(f"[ComplexData] Invalid value '{value}' for key '{key}'")
+                if not any(
+                    self._is_match(value, validator)
+                    for validator in values_schema
+                ):
+                    raise ValueError(
+                        f"[ComplexData] Invalid value '{value}' "
+                        f"for key '{key}'"
+                    )
 
         return True
 
+    # =========================================================
+    # SERIALIZATION
+    # =========================================================
+
     @classmethod
     def _serialize_recursive(cls, element: Any) -> Any:
-        # 1. Caso: Instancias de validadores propios
         if isinstance(element, (PrimitiveData, ComplexData)):
             return {
                 "__type__": element.__class__.__name__,
-                "content": element.to_dict()
+                "content": element.to_dict(),
             }
-        
-        # 2. Caso: Referencias a tipos de clase (int, str, etc.)
+
         if isinstance(element, type):
             return {"__class__": element.__name__}
-        
-        # 3. Caso: Colecciones estándar
+
         if isinstance(element, (list, tuple, set, frozenset)):
-            return [cls._serialize_recursive(i) for i in element]
-        
+            return [cls._serialize_recursive(item) for item in element]
+
         if isinstance(element, dict):
-            new_dict = {}
-            for k, v in element.items():
-                # Serialización de clave: si es compleja, se convierte a JSON string
-                # para mantener la validez del formato JSON.
-                serialized_key = cls._serialize_recursive(k)
+            serialized_dictionary = {}
+
+            for key, value in element.items():
+                serialized_key = cls._serialize_recursive(key)
+
                 if isinstance(serialized_key, (dict, list)):
-                    import json
-                    key_repr = json.dumps(serialized_key)
+                    key_representation = json.dumps(serialized_key)
                 else:
-                    key_repr = str(serialized_key)
-                
-                new_dict[key_repr] = cls._serialize_recursive(v)
-            return new_dict
-        
-        # 4. Caso: Literales
+                    key_representation = str(serialized_key)
+
+                serialized_dictionary[key_representation] = (
+                    cls._serialize_recursive(value)
+                )
+
+            return serialized_dictionary
+
         return element
 
     @classmethod
     def _deserialize_recursive(cls, element: Any) -> Any:
-        SAFE_TYPES = {
-            "list": list, "tuple": tuple, "set": set, "frozenset": frozenset, 
-            "dict": dict, "str": str, "int": int, "float": float, "bool": bool,
-            "bytes": bytes, "bytearray": bytearray, "NoneType": type(None)
+        safe_types = {
+            "list": list,
+            "tuple": tuple,
+            "set": set,
+            "frozenset": frozenset,
+            "dict": dict,
+            "str": str,
+            "int": int,
+            "float": float,
+            "bool": bool,
+            "bytes": bytes,
+            "bytearray": bytearray,
+            "NoneType": type(None),
         }
 
         if isinstance(element, dict):
-            # CASO A: Es un objeto serializado (PrimitiveData o ComplexData)
             if "__type__" in element:
-                obj_type = element["__type__"]
+                object_type = element["__type__"]
                 content = element["content"]
-                if obj_type == "PrimitiveData":
-                    return PrimitiveData.from_dict(content)
-                elif obj_type == "ComplexData":
-                    return cls.from_dict(content)
-                raise ValueError(f"Unknown serialized object type: {obj_type}")
 
-            # CASO B: Es una referencia a un tipo (__class__)
+                if object_type == "PrimitiveData":
+                    return PrimitiveData.from_dict(content)
+
+                if object_type == "ComplexData":
+                    return cls.from_dict(content)
+
+                raise ValueError(
+                    f"Unknown serialized object type: {object_type}"
+                )
+
             if "__class__" in element:
                 type_name = element["__class__"]
-                if type_name in SAFE_TYPES:
-                    return SAFE_TYPES[type_name]
-                raise ValueError(f"Type '{type_name}' is not allowed or unknown.")
 
-            # CASO C: Diccionario de datos (Reconstrucción de claves y valores)
-            decoded_dict = {}
-            for k, v in element.items():
-                processed_key = k
-                # Detectar si la clave es un objeto empaquetado en string
-                if isinstance(k, str) and (k.startswith('{') or k.startswith('[')):
+                if type_name in safe_types:
+                    return safe_types[type_name]
+
+                raise ValueError(
+                    f"Type '{type_name}' is not allowed or unknown."
+                )
+
+            decoded_dictionary = {}
+
+            for key, value in element.items():
+                processed_key = key
+
+                if isinstance(key, str) and (
+                    key.startswith("{") or key.startswith("[")
+                ):
                     try:
-                        import json
-                        potential_obj = json.loads(k)
-                        if isinstance(potential_obj, (dict, list)):
-                            processed_key = cls._deserialize_recursive(potential_obj)
-                    except:
-                        pass # Si falla, se queda como string literal
-                
-                decoded_dict[processed_key] = cls._deserialize_recursive(v)
-            return decoded_dict
+                        possible_object = json.loads(key)
+
+                        if isinstance(possible_object, (dict, list)):
+                            processed_key = cls._deserialize_recursive(
+                                possible_object
+                            )
+                    except (
+                        json.JSONDecodeError,
+                        TypeError,
+                        ValueError,
+                    ):
+                        pass
+
+                decoded_dictionary[processed_key] = (
+                    cls._deserialize_recursive(value)
+                )
+
+            return decoded_dictionary
 
         if isinstance(element, list):
             return [cls._deserialize_recursive(item) for item in element]
-        
+
         return element
 
-    # Public methods
     def to_dict(self) -> dict:
         return {
-            "DATA_TYPE":self.data_type.__name__ if hasattr(self.data_type, '__name__') else str(self.data_type),
-            "NAME":self.name,
-            "DESCRIPTION":self.description,
-            "VALUE":self._serialize_recursive(self.value),
-            "MAXIMUM_LENGTH":self.maximum_length,
-            "MINIMUM_LENGTH":self.minimum_length,
-            "POSSIBLE_VALUES":self._serialize_recursive(self.possible_values) if self.possible_values is not None else None,
-            "DATA_CLASS":self.data_class,
-            "__type__":"ComplexData"
+            "DATA_TYPE": (
+                self.data_type.__name__
+                if hasattr(self.data_type, "__name__")
+                else str(self.data_type)
+            ),
+            "NAME": self.name,
+            "DESCRIPTION": self.description,
+            "VALUE": self._serialize_recursive(self.value),
+            "MAXIMUM_LENGTH": self.maximum_length,
+            "MINIMUM_LENGTH": self.minimum_length,
+            "POSSIBLE_VALUES": (
+                self._serialize_recursive(self.possible_values)
+                if self.possible_values is not None
+                else None
+            ),
+            "DATA_CLASS": self.data_class,
+            "VALIDATION_MODE": self.validation_mode.value,
+            "__type__": "ComplexData",
         }
 
-    
     @classmethod
-    def from_dict(cls, data: dict) -> 'ComplexData':
-        # 1. Secure types mapping
-        SAFE_TYPES = {
-            "list": list, "tuple": tuple, "set": set, "frozenset": frozenset, 
-            "dict": dict, "str": str, "int": int, "float": float, "bool": bool,
-            "bytes": bytes, "bytearray": bytearray
+    def from_dict(cls, data: dict) -> "ComplexData":
+        safe_types = {
+            "list": list,
+            "tuple": tuple,
+            "set": set,
+            "frozenset": frozenset,
+            "dict": dict,
+            "str": str,
+            "int": int,
+            "float": float,
+            "bool": bool,
+            "bytes": bytes,
+            "bytearray": bytearray,
         }
 
-        # 3. Validación y Reconstrucción del Root
-        # Recuperamos el tipo de dato principal
         raw_type = data.get("DATA_TYPE")
-        data_type = SAFE_TYPES.get(raw_type)
-        if not data_type:
+        data_type = safe_types.get(raw_type)
+
+        if data_type is None:
             raise TypeError(f"Invalid root data type: {raw_type}")
 
-        # Procesamos los possible_values con el motor recursivo
         raw_possible = data.get("POSSIBLE_VALUES")
-        possible_values = cls._deserialize_recursive(raw_possible) if raw_possible is not None else None
-        
-        # Corrección de tipo para tuplas (JSON no tiene tuplas, devuelve listas)
-        # Si su __init__ es estricto y requiere tupla para possible_values, convertimos aquí:
-        if isinstance(possible_values, list) and data_type != dict:
-             possible_values = tuple(possible_values)
-        
-        # Para dicts, mantenemos la lista de listas o convertimos según su preferencia estricta
-        if isinstance(possible_values, list) and data_type == dict:
-             # Opcional: convertir sub-listas a tuplas si su validador lo prefiere, 
-             # aunque su validación actual acepta listas.
-             pass
+        possible_values = (
+            cls._deserialize_recursive(raw_possible)
+            if raw_possible is not None
+            else None
+        )
+
+        # JSON has no tuple. Preserve the historical reconstruction behavior.
+        if isinstance(possible_values, list) and data_type is not dict:
+            possible_values = tuple(possible_values)
+
+        value = cls._deserialize_recursive(data.get("VALUE"))
+
+        # Restore the declared root collection after JSON decoding when safe.
+        if value is not None and data_type in (
+            tuple,
+            set,
+            frozenset,
+        ):
+            value = data_type(value)
 
         return cls(
             data_type=data_type,
             name=data.get("NAME"),
             description=data.get("DESCRIPTION"),
-            value=data.get("VALUE"), # Asumimos valor literal o serializable simple
+            value=value,
             maximum_length=data.get("MAXIMUM_LENGTH"),
             minimum_length=data.get("MINIMUM_LENGTH"),
             possible_values=possible_values,
-            data_class=data.get("DATA_CLASS", False)
+            data_class=data.get("DATA_CLASS", False),
+            validation_mode=data.get(
+                "VALIDATION_MODE",
+                ValidationMode.ANY.value,
+            ),
         )
 
-    
     @classmethod
-    def from_json(cls, text_content: str) -> 'ComplexData':
+    def from_json(cls, text_content: str) -> "ComplexData":
         try:
             data = json.loads(text_content)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON: {e}")
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Invalid JSON: {error}") from error
+
         return cls.from_dict(data)
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=4)
-    
-    def validate(self, data: Any = None) -> bool:
-        # Determine objective data
-        if data is None:
-            objective_data = self.value
-        else:
-            objective_data = data
 
-        # Data type validation
+    # =========================================================
+    # VALIDATION
+    # =========================================================
+
+    def validate(self, data: Any = None) -> bool:
+        # None retains the original meaning: validate the stored value.
+        objective_data = self.value if data is None else data
+
         if not isinstance(objective_data, self.data_type):
             raise exceptions.DataTypeException(
-                f"Incorrect data type.\nExpected: {self.data_type.__name__} - Received: {type(objective_data).__name__}"
+                "Incorrect data type.\n"
+                f"Expected: {self.data_type.__name__} - "
+                f"Received: {type(objective_data).__name__}"
             )
-    
-        # Length validation
+
         current_length = len(objective_data)
-        
-        if self.minimum_length is not None and current_length < self.minimum_length:
-            raise ValueError(f"Minimum length not reached: {current_length} < {self.minimum_length}")
-    
-        if self.maximum_length is not None and current_length > self.maximum_length:
-            raise ValueError(f"Maximum length reached: {current_length} > {self.maximum_length}")
-    
-        # Content validation and recurse
-        if self.possible_values:
-            # Validate dictionaries
+
+        if (
+            self.minimum_length is not None
+            and current_length < self.minimum_length
+        ):
+            raise exceptions.LengthException(
+                "Minimum length not reached: "
+                f"{current_length} < {self.minimum_length}"
+            )
+
+        if (
+            self.maximum_length is not None
+            and current_length > self.maximum_length
+        ):
+            raise exceptions.LengthException(
+                "Maximum length exceeded: "
+                f"{current_length} > {self.maximum_length}"
+            )
+
+        if self.validation_mode is ValidationMode.POSITIONAL:
+            self._validate_positional_collection(objective_data)
+        elif self.possible_values:
             if isinstance(objective_data, dict):
                 self._validate_dictionary(objective_data)
             else:
                 self._validate_collection(objective_data)
-        
-        # Return results
+
         return True
 
+    # =========================================================
+    # CLI CAPTURE
+    # =========================================================
+
     def cli_capture(self, prompt_context: str = "") -> Any:
-        """Punto de entrada para la hidratación de datos desde CLI."""
+        if self.validation_mode is ValidationMode.POSITIONAL:
+            return self._cli_capture_positional(prompt_context)
+
         if self.data_type is dict:
             return self._cli_capture_mapping(prompt_context)
+
         return self._cli_capture_collection(prompt_context)
 
-    def _get_user_selection(self, options: list, prompt_context: str, label: str = "Selección") -> Any:
-        """
-        Garantiza una selección válida de índice. 
-        Maneja entradas vacías, no numéricas y fuera de rango.
-        """
+    def _get_user_selection(
+        self,
+        options: list,
+        prompt_context: str,
+        label: str = "Selection",
+    ) -> Any:
         while True:
-            raw_input = input(f"{prompt_context}        > {label}: ").strip()
-            
+            raw_input = input(
+                f"{prompt_context}        > {label}: "
+            ).strip()
+
             if not raw_input:
-                print(f"{prompt_context}        [!] Error: La entrada no puede estar vacía.")
+                print(
+                    f"{prompt_context}        [!] Error: "
+                    "input cannot be empty."
+                )
                 continue
-            
+
             if not raw_input.isdigit():
-                print(f"{prompt_context}        [!] Error: Ingrese un número entero válido.")
+                print(
+                    f"{prompt_context}        [!] Error: "
+                    "enter a valid integer."
+                )
                 continue
-            
-            idx = int(raw_input)
-            if 0 <= idx < len(options):
-                return options[idx]
-            
-            print(f"{prompt_context}        [!] Error: Índice fuera de rango (0-{len(options)-1}).")
+
+            index = int(raw_input)
+
+            if 0 <= index < len(options):
+                return options[index]
+
+            print(
+                f"{prompt_context}        [!] Error: index outside "
+                f"range (0-{len(options) - 1})."
+            )
+
+    @staticmethod
+    def _capture_type(data_type: type, raw_value: str) -> Any:
+        if data_type is bool:
+            normalized = raw_value.strip().lower()
+
+            if normalized in ("true", "1", "t", "y", "yes", "s", "si"):
+                return True
+
+            if normalized in ("false", "0", "f", "n", "no"):
+                return False
+
+            raise ValueError(f"Invalid boolean: {raw_value!r}")
+
+        if data_type in (bytes, bytearray):
+            return data_type(raw_value.encode("utf-8"))
+
+        return data_type(raw_value)
+
+    def _cli_capture_positional(self, prompt_context: str) -> Any:
+        results = []
+
+        print(
+            f"\n{prompt_context}[*] Configuring positional collection: "
+            f"{self.name or 'Collection'}"
+        )
+
+        for index, schema in enumerate(self.possible_values):
+            schema_name = getattr(schema, "name", None)
+
+            print(
+                f"{prompt_context}    [{index}] "
+                f"{schema_name or 'Unnamed position'}"
+            )
+
+            if hasattr(schema, "cli_capture"):
+                value = schema.cli_capture(prompt_context + "    ")
+            elif isinstance(schema, type):
+                raw_value = input(
+                    f"{prompt_context}    [>] Value ({schema.__name__}): "
+                )
+                value = self._capture_type(schema, raw_value)
+            else:
+                print(
+                    f"{prompt_context}    [=] Fixed value: {schema!r}"
+                )
+                value = schema
+
+            results.append(value)
+
+        self.value = self.data_type(results)
+        self.validate(self.value)
+        return self.value
 
     def _cli_capture_collection(self, prompt_context: str) -> list:
         results = []
-        print(f"\n{prompt_context}[*] Iniciando colección: {self.name or 'Lista'}")
-        
+
+        print(
+            f"\n{prompt_context}[*] Starting collection: "
+            f"{self.name or 'List'}"
+        )
+
         while True:
-            # Control de cardinalidad mínima
-            if self.minimum_length is None or len(results) >= self.minimum_length:
-                op = input(f"{prompt_context}    [?] ¿Añadir elemento a {self.name}? [s/N]: ").strip().lower()
-                if op != 's':
+            if self.minimum_length is None or len(results) >= (
+                self.minimum_length
+            ):
+                operation = input(
+                    f"{prompt_context}    [?] Add element to "
+                    f"{self.name}? [y/N]: "
+                ).strip().lower()
+
+                if operation not in ("y", "yes", "s", "si"):
                     break
 
-            # Selección de esquema para el nuevo elemento
             options = list(self.possible_values)
+
             if len(options) == 1:
                 selected_schema = options[0]
             else:
-                print(f"{prompt_context}    [+] Tipos disponibles:")
-                for i, schema in enumerate(options):
-                    name = getattr(schema, 'name', f"Opción {i}")
-                    print(f"{prompt_context}        {i}) {name}")
-                selected_schema = self._get_user_selection(options, prompt_context)
+                print(f"{prompt_context}    [+] Available types:")
 
-            # Captura recursiva
-            if hasattr(selected_schema, 'cli_capture'):
-                results.append(selected_schema.cli_capture(prompt_context + "    "))
+                for index, schema in enumerate(options):
+                    name = getattr(schema, "name", f"Option {index}")
+                    print(f"{prompt_context}        {index}) {name}")
+
+                selected_schema = self._get_user_selection(
+                    options,
+                    prompt_context,
+                )
+
+            if hasattr(selected_schema, "cli_capture"):
+                results.append(
+                    selected_schema.cli_capture(prompt_context + "    ")
+                )
+            elif isinstance(selected_schema, type):
+                raw_value = input(f"{prompt_context}    [>] Value: ")
+                results.append(
+                    self._capture_type(selected_schema, raw_value)
+                )
             else:
-                val = input(f"{prompt_context}    [>] Valor: ")
-                results.append(val)
-        
+                results.append(selected_schema)
+
         self.value = self.data_type(results)
-        return results
+        return self.value
 
     def _cli_capture_mapping(self, prompt_context: str) -> dict:
-        """Captura para esquemas de tipo diccionario (Mapping Schema)."""
-        captured_dict = {}
-        print(f"\n{prompt_context}[*] Configurando: {self.name or 'Objeto'}")
-        
-        # Iteramos sobre las claves definidas en possible_values (dict)
+        captured_dictionary = {}
+
+        print(
+            f"\n{prompt_context}[*] Configuring: "
+            f"{self.name or 'Object'}"
+        )
+
         for key, schemas in self.possible_values.items():
-            # Si solo hay una opción, se captura o auto-asigna
             if isinstance(schemas, (list, tuple)) and len(schemas) > 1:
-                print(f"{prompt_context}    [+] Opciones para '{key}':")
-                for i, s in enumerate(schemas):
-                    name = getattr(s, 'name', str(s))
-                    print(f"{prompt_context}        {i}) {name}")
-                selected = self._get_user_selection(list(schemas), prompt_context)
-            else:
-                selected = schemas[0] if isinstance(schemas, (list, tuple)) else schemas
+                print(f"{prompt_context}    [+] Options for '{key}':")
 
-            # Manejo de literales auto-asignados (ej: "INTERNET")
-            if isinstance(selected, str) and not hasattr(selected, 'cli_capture'):
-                print(f"{prompt_context}    [=] {key}: {selected} (Auto-asignado)")
-                captured_dict[key] = selected
-            else:
-                captured_dict[key] = selected.cli_capture(prompt_context + "    ")
+                for index, schema in enumerate(schemas):
+                    name = getattr(schema, "name", str(schema))
+                    print(f"{prompt_context}        {index}) {name}")
 
-        self.value = captured_dict
-        return captured_dict
+                selected = self._get_user_selection(
+                    list(schemas),
+                    prompt_context,
+                )
+            else:
+                selected = (
+                    schemas[0]
+                    if isinstance(schemas, (list, tuple))
+                    else schemas
+                )
+
+            if isinstance(selected, str) and not hasattr(
+                selected,
+                "cli_capture",
+            ):
+                print(
+                    f"{prompt_context}    [=] {key}: "
+                    f"{selected} (Auto-assigned)"
+                )
+                captured_dictionary[key] = selected
+            elif hasattr(selected, "cli_capture"):
+                captured_dictionary[key] = selected.cli_capture(
+                    prompt_context + "    "
+                )
+            elif isinstance(selected, type):
+                raw_value = input(
+                    f"{prompt_context}    [>] {key} ({selected.__name__}): "
+                )
+                captured_dictionary[key] = self._capture_type(
+                    selected,
+                    raw_value,
+                )
+            else:
+                captured_dictionary[key] = selected
+
+        self.value = captured_dictionary
+        return captured_dictionary
