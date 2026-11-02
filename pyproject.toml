@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datavalue"
 version = "0.1.21" 
-description = "Librería de tipos de datos primitivos y complejos"
+description = "Librería de especificacion, validacion y transporte/almacenamiento de tipos de datos primitivos y complejos"
 readme = "README.md"
 authors = [{ name="Specter" }]
 requires-python = ">=3.10"

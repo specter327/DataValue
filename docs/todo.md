@@ -11,3 +11,9 @@ type(value) is int == False # PROTECCION
 7. Adjuntar el enlace a la libreria PyPi actual publicada
 8. Adjuntar instrucciones de instalacion, actualizacion, y desinstalacion simples y automatizadas mediante scripts
 9. Mejorar navegacion de documentacion y presentacion
+10. PODRIAMOS implementar un generador de documentacion simple, en algun formato
+11. Integracion de versiones como metadato para PrimitiveData y ComplexData
+12. Deteccion de in/compatibilidad entre version de libreria y version de instancia PrimitiveData y ComplexData # Util para importacion de datos
+13. Pulir el flujo de CI/release
+14. Enriquecer casos de uso para demostrar la utilidad
+15. Agregar licencia de uso libre

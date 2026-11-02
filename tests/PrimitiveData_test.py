@@ -23,7 +23,7 @@ print("Phone number validated sucessfully:", phone_number.value)
 # Connection port validation
 print("="*10)
 print("Validating connection port...")
-connection_port = PrimitiveData(
+connection_port = datavalue.PrimitiveData(
   data_type=int,
   value=45321,
   minimum_length=1, # Maximum digits
@@ -41,7 +41,7 @@ print("Connection port validated:", connection_port.value)
 # Transport protocol validation
 print("="*10)
 print("Validating transport protocol...")
-transport_protocol = PrimitiveData(
+transport_protocol = datavalue.PrimitiveData(
   data_type=str,
   value="TCP",
   maximum_length=None,

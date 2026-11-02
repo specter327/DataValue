@@ -4,7 +4,7 @@ from datavalue import ComplexData, PrimitiveData
 # Execute validations
 print("="*5)
 print("Validating list of allowed values...")
-values_validation = ComplexData(
+values_validation = datavalue.ComplexData(
   data_type=list,
   value=["A", "B", "D"],
   possible_values=["A", "B", "D", "C"]
@@ -55,7 +55,7 @@ print("Validation completed successfully")
 
 print("="*5)
 print("Validating user profile table...")
-user_profile_validator = ComplexData(
+user_profile_validator = datavalue.ComplexData(
   data_type=dict,
   value={
     "USERNAME":"Specter",

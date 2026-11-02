@@ -77,6 +77,18 @@ class ComplexData:
     # =========================================================
     # CONSTRUCTOR VALIDATION
     # =========================================================
+    def __repr__(self) -> str:
+        return f"""ComplexData(
+    data_type={self.data_type},
+    value={self.value},
+    name={self.name},
+    description={self.description},
+    maximum_length={self.maximum_length}, minimum_length={self.minimum_length},
+    possible_values={self.possible_values},
+    data_class={self.data_class},
+    validation_mode={self.validation_mode}
+)
+        """
 
     def _validate_constructor(self) -> None:
         supported_types = (list, tuple, set, frozenset, dict)

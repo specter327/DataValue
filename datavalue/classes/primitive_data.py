@@ -34,6 +34,19 @@ class PrimitiveData:
             self.validate()
     
     # Private methods
+    def __repr__(self) -> str:
+        return f"""PrimitiveData(
+    data_type={self.data_type},
+    value={self.value},
+    name={self.name},
+    description={self.description},
+    maximum_length={self.maximum_length}, minimum_length={self.minimum_length},
+    maximum_size={self.maximum_size}, minimum_size={self.minimum_size},
+    possible_values={self.possible_values},
+    regular_expression={self.regular_expression},
+    data_class={self.data_class}
+)"""
+
     def _is_match(self, element: Any, schema: Any) -> bool:        
         if isinstance(schema, PrimitiveData):
             try:
